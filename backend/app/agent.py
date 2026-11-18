@@ -3,6 +3,7 @@
 Le LLM choisit les outils ; c'est le code (dispatch) qui les exécute réellement.
 Chaque étape est tracée dans agent_steps. La boucle est bornée par max_steps.
 """
+import ipaddress
 import json
 
 from app.config import settings
@@ -11,6 +12,30 @@ from app.prompts import SOC_SYSTEM_PROMPT, alert_user_message
 from app.tools import TOOLS_SCHEMA, dispatch, dumps
 
 MAX_TOKENS = 400  # réponse courte → coût maîtrisé
+
+
+def _same_ip(a, b) -> bool:
+    """Compare deux IP sous forme normalisée (sinon False)."""
+    try:
+        return ipaddress.ip_address(str(a)) == ipaddress.ip_address(str(b))
+    except ValueError:
+        return False
+
+
+def _action_guard(name: str, args: dict, alert: dict) -> dict | None:
+    """Restreint les actions à l'alerte en cours (défense anti prompt-injection).
+
+    Renvoie un message d'erreur à transmettre au modèle, ou None si l'action est
+    autorisée. Pour close_alert, impose l'id de l'alerte côté serveur.
+    """
+    if name == "close_alert":
+        args["alert_id"] = alert["id"]
+        return None
+    if name == "block_ip" and not _same_ip(args.get("ip"), alert["ip"]):
+        return {"ok": False, "error": "block_ip limité à l'IP de l'alerte"}
+    if name == "flag_user" and args.get("user") != alert["username"]:
+        return {"ok": False, "error": "flag_user limité au compte de l'alerte"}
+    return None
 
 
 def _record_step(alert_id: int, step: int, tool: str, args: dict, result: dict) -> None:
@@ -24,6 +49,33 @@ def _record_step(alert_id: int, step: int, tool: str, args: dict, result: dict) 
              "r": dumps(result)},
         )
         conn.commit()
+
+
+def _assistant_message(message, tool_calls) -> dict:
+    """Reconstruit le message assistant (avec ses tool_calls) pour l'historique."""
+    return {
+        "role": "assistant", "content": message.content or "",
+        "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in tool_calls
+        ],
+    }
+
+
+def _run_tool_call(tc, alert: dict, step: int) -> dict:
+    """Exécute un appel d'outil (avec garde-fous) et renvoie {name, args, result}."""
+    name = tc.function.name
+    try:
+        args = json.loads(tc.function.arguments or "{}")
+    except json.JSONDecodeError:
+        args, result = {}, {"ok": False, "error": "arguments JSON invalides"}
+    else:
+        guard = _action_guard(name, args, alert) if isinstance(args, dict) else None
+        result = guard if guard is not None else dispatch(name, args)
+
+    _record_step(alert["id"], step, name, args, result)
+    return {"tool": name, "args": args, "result": result}
 
 
 def run_on_alert(alert: dict, client) -> dict:
@@ -41,10 +93,8 @@ def run_on_alert(alert: dict, client) -> dict:
 
     for step in range(1, settings.max_steps + 1):
         response = client.chat.completions.create(
-            model=settings.llm_model,
-            messages=messages,
-            tools=TOOLS_SCHEMA,
-            max_tokens=MAX_TOKENS,
+            model=settings.llm_model, messages=messages,
+            tools=TOOLS_SCHEMA, max_tokens=MAX_TOKENS,
         )
         message = response.choices[0].message
         tool_calls = getattr(message, "tool_calls", None)
@@ -53,40 +103,15 @@ def run_on_alert(alert: dict, client) -> dict:
         if not tool_calls:
             break
 
-        # Le message de l'assistant (avec ses tool_calls) doit précéder les réponses.
-        messages.append({
-            "role": "assistant", "content": message.content or "",
-            "tool_calls": [
-                {"id": tc.id, "type": "function",
-                 "function": {"name": tc.function.name,
-                              "arguments": tc.function.arguments}}
-                for tc in tool_calls
-            ],
-        })
+        messages.append(_assistant_message(message, tool_calls))
 
         for tc in tool_calls:
-            name = tc.function.name
-            # Arguments JSON potentiellement invalides renvoyés par le modèle.
-            try:
-                args = json.loads(tc.function.arguments or "{}")
-            except json.JSONDecodeError:
-                result = {"ok": False, "error": "arguments JSON invalides"}
-                args = {}
-            else:
-                # Sécurité : l'agent ne peut clôturer QUE l'alerte en cours. On impose
-                # l'id côté serveur, sans faire confiance à l'argument du modèle.
-                if name == "close_alert" and isinstance(args, dict):
-                    args["alert_id"] = alert["id"]
-                result = dispatch(name, args)
-
-            _record_step(alert["id"], step, name, args, result)
-            steps.append({"step": step, "tool": name, "args": args, "result": result})
-
+            outcome = _run_tool_call(tc, alert, step)
+            steps.append({"step": step, **outcome})
             messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": dumps(result),
+                "role": "tool", "tool_call_id": tc.id, "content": dumps(outcome["result"]),
             })
-
-            if name == "close_alert" and result.get("ok"):
+            if outcome["tool"] == "close_alert" and outcome["result"].get("ok"):
                 closed = True
 
         if closed:

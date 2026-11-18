@@ -23,8 +23,12 @@ from app.db import get_conn
 #   Invalid user admin from 45.133.1.77 port 51046
 # Préfixe syslog : le tag « sshd[pid]: » avec un PID obligatoire (recherche linéaire).
 _RE_PREFIX = re.compile(r"\ssshd(?:-session)?\[\d+\]:\s(?P<msg>.+)$")
-# Nom d'utilisateur limité au jeu de caractères réellement accepté par sshd.
-_USER = r"(?P<user>[A-Za-z0-9._@-]{1,64})"
+# Le username est capturé de façon permissive pour ne manquer aucune tentative
+# (un attaquant ne doit pas échapper à la détection avec un nom exotique). Il reste
+# une donnée NON FIABLE : il n'est jamais inséré tel quel dans une commande, et il
+# est validé/échappé au point d'usage (flag_user). L'IP, elle, est ancrée en fin de
+# ligne et validée, ce qui empêche l'usurpation via le username.
+_USER = r"(?P<user>.+?)"
 _RE_FAILED = re.compile(
     rf"^Failed password for (?:invalid user )?{_USER} from (?P<ip>\S+) port \d+(?: ssh2)?$"
 )

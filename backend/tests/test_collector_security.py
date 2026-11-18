@@ -11,11 +11,15 @@ def test_ip_spoofing_par_le_username():
     assert r is None or r["ip"] != "9.9.9.9"
 
 
-def test_username_avec_espaces_rejete():
-    # Un username contenant des espaces (hors charset sshd) : ligne ignorée.
+def test_username_dangereux_capture_mais_ip_correcte():
+    # Un username forgé est conservé (détection complète) mais l'IP reste la vraie.
+    # L'échappement se fait plus tard, au point d'usage (flag_user).
     line = ("2026-11-18T02:10:01+01:00 host sshd[2211]: "
             "Failed password for root; rm -rf / from 45.133.1.77 port 51044 ssh2")
-    assert parse_line(line) is None
+    r = parse_line(line)
+    assert r is not None
+    assert r["ip"] == "45.133.1.77"
+    assert r["outcome"] == "failed"
 
 
 def test_prefixe_sshd_sans_pid_rejete():
