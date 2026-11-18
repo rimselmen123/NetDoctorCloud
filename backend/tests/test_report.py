@@ -39,7 +39,7 @@ def test_send_report_appelle_smtp(monkeypatch):
             sent["host"] = host
         def __enter__(self): return self
         def __exit__(self, *a): return False
-        def starttls(self): sent["tls"] = True
+        def starttls(self, context=None): sent["tls"] = True
         def login(self, u, p): sent["login"] = u
         def send_message(self, msg): sent["to"] = msg["To"]
 

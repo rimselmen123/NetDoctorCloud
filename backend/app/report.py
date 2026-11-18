@@ -5,6 +5,7 @@ que ce que l'agent a réellement fait. L'envoi se fait via Gmail SMTP (STARTTLS)
 """
 import html
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from app.config import settings
@@ -88,9 +89,11 @@ def send_report() -> dict:
     msg.set_content("Rapport AgentDoctor (version HTML requise).")
     msg.add_alternative(build_report(stats), subtype="html")
 
+    # Contexte TLS vérifiant (certificat + nom d'hôte) pour chiffrer l'envoi.
+    context = ssl.create_default_context()
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=10) as server:
-            server.starttls()
+            server.starttls(context=context)
             server.login(settings.smtp_user, settings.smtp_app_password)
             server.send_message(msg)
     except Exception as exc:  # pragma: no cover - dépend du réseau
