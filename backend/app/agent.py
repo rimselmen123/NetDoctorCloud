@@ -91,6 +91,40 @@ def _run_tool_call(tc, alert: dict, step: int) -> dict:
     return {"tool": name, "args": args, "result": result}
 
 
+def _ensure_response_actions(alert: dict, steps: list[dict]) -> None:
+    """Filet de sécurité : garantit la réponse aux attaques confirmées.
+
+    Un agent SOC doit AGIR sur une alerte confirmée high/critical. Si le LLM a oublié
+    de bloquer l'IP (ou de signaler le compte pour une alerte critique), on le fait
+    ici en code, de façon déterministe. Les actions ajoutées sont tracées.
+    """
+    from app.tools import block_ip, flag_user
+
+    close = next((s for s in steps
+                  if s["tool"] == "close_alert" and s["result"].get("ok")), None)
+    if close is None:
+        return
+    verdict = close["args"].get("verdict")
+    severity = close["args"].get("severity")
+    if verdict != "true_positive" or severity not in ("high", "critical"):
+        return
+
+    blocked = any(s["tool"] == "block_ip" and s["result"].get("ok") for s in steps)
+    flagged = any(s["tool"] == "flag_user" and s["result"].get("ok") for s in steps)
+    extra = settings.max_steps + 1
+
+    if not blocked:
+        result = block_ip(alert["ip"], "réponse automatique : attaque confirmée")
+        _record_step(alert["id"], extra, "block_ip", {"ip": alert["ip"]}, result)
+        steps.append({"step": extra, "tool": "block_ip",
+                      "args": {"ip": alert["ip"]}, "result": result})
+    if severity == "critical" and not flagged:
+        result = flag_user(alert["username"], "réponse automatique : compte compromis")
+        _record_step(alert["id"], extra, "flag_user", {"user": alert["username"]}, result)
+        steps.append({"step": extra, "tool": "flag_user",
+                      "args": {"user": alert["username"]}, "result": result})
+
+
 def run_on_alert(alert: dict, client) -> dict:
     """Traite une alerte. Renvoie {alert_id, steps, closed}.
 
@@ -130,6 +164,8 @@ def run_on_alert(alert: dict, client) -> dict:
         if closed:
             break
 
+    # Filet de sécurité : garantit la réponse aux attaques confirmées.
+    _ensure_response_actions(alert, steps)
     return {"alert_id": alert["id"], "steps": steps, "closed": closed}
 
 

@@ -38,6 +38,9 @@ def _no_db(monkeypatch):
     monkeypatch.setattr(agent, "_record_step", lambda *a, **k: None)
     monkeypatch.setattr(agent, "dispatch",
                         lambda name, args: {"ok": True, "tool": name})
+    # Le filet de sécurité appelle directement ces outils : on les neutralise aussi.
+    monkeypatch.setattr("app.tools.block_ip", lambda ip, reason="": {"ok": True})
+    monkeypatch.setattr("app.tools.flag_user", lambda user, reason="": {"ok": True})
 
 
 def test_boucle_sarrete_a_close_alert(monkeypatch):
@@ -58,7 +61,8 @@ def test_boucle_sarrete_a_close_alert(monkeypatch):
 
     assert out["closed"] is True
     assert llm.calls == 2  # s'est arrêté dès close_alert, sans 3e appel
-    assert [s["tool"] for s in out["steps"]] == ["ip_history", "close_alert"]
+    # ip_history, close_alert, puis le blocage garanti par le filet de sécurité (high).
+    assert [s["tool"] for s in out["steps"]] == ["ip_history", "close_alert", "block_ip"]
 
 
 def test_reponse_texte_arrete_la_boucle():
@@ -96,3 +100,23 @@ def test_verdict_plancher_force_true_positive(monkeypatch):
     assert captured["verdict"] == "true_positive"
     assert captured["severity"] == "high"
     assert captured["alert_id"] == 5  # id imposé côté serveur
+
+
+def test_filet_securite_garantit_le_blocage(monkeypatch):
+    """Si le LLM clôt une alerte critique sans agir, le code bloque l'IP et
+    signale le compte automatiquement."""
+    calls = []
+    monkeypatch.setattr("app.tools.block_ip",
+                        lambda ip, reason="": calls.append(("block", ip)) or {"ok": True})
+    monkeypatch.setattr("app.tools.flag_user",
+                        lambda user, reason="": calls.append(("flag", user)) or {"ok": True})
+    # Le LLM clôt directement en critical, sans block ni flag.
+    seq = [SimpleNamespace(content=None, tool_calls=[_tool_call(
+        "c1", "close_alert",
+        {"alert_id": 1, "verdict": "true_positive", "severity": "critical", "reason": "x"})])]
+    llm = FakeLLM(seq)
+    alert = {"id": 1, "type": "success_after_failures", "ip": "9.9.9.9",
+             "username": "victime", "count": 11}
+    agent.run_on_alert(alert, llm)
+    assert ("block", "9.9.9.9") in calls
+    assert ("flag", "victime") in calls
