@@ -3,21 +3,33 @@
 On ne garde que les lignes utiles à la détection (échecs, succès, utilisateur invalide).
 Chaque fonction est pure et testable sans base ni réseau pour le parsing.
 """
+import ipaddress
 import re
 from datetime import datetime
 
 from app.db import get_conn
 
-# Exemples de lignes gérées :
+# Le nom d'utilisateur est contrôlé par l'attaquant : il peut contenir du texte
+# imitant « from <ip> port <n> » pour usurper l'IP. On se protège en deux temps :
+#   1. on n'accepte que le message issu du démon « sshd[pid]: » ;
+#   2. on extrait l'IP et le port UNIQUEMENT en fin de ligne (ancre $),
+#      puis on valide l'IP avec ipaddress. Le nom d'utilisateur (non fiable)
+#      reste capturé en mode non gourmand, sans pouvoir décaler l'IP réelle.
+#
+# Exemples de messages gérés :
 #   Failed password for root from 45.133.1.77 port 51044 ssh2
 #   Failed password for invalid user admin from 45.133.1.77 port 51046 ssh2
 #   Accepted password for victime from 103.88.4.19 port 40110 ssh2
 #   Invalid user admin from 45.133.1.77 port 51046
+_RE_PREFIX = re.compile(r"sshd(?:\[\d+\])?:\s*(?P<msg>.+)$")
 _RE_FAILED = re.compile(
-    r"Failed password for (?:invalid user )?(?P<user>\S+) from (?P<ip>\S+)"
+    r"^Failed password for (?:invalid user )?(?P<user>.+?) "
+    r"from (?P<ip>\S+) port \d+(?: ssh2)?$"
 )
-_RE_ACCEPTED = re.compile(r"Accepted password for (?P<user>\S+) from (?P<ip>\S+)")
-_RE_INVALID = re.compile(r"Invalid user (?P<user>\S+) from (?P<ip>\S+)")
+_RE_ACCEPTED = re.compile(
+    r"^Accepted password for (?P<user>.+?) from (?P<ip>\S+) port \d+(?: ssh2)?$"
+)
+_RE_INVALID = re.compile(r"^Invalid user (?P<user>.+?) from (?P<ip>\S+) port \d+$")
 
 # Horodatage ISO 8601 en tête de ligne (format rsyslog moderne d'Ubuntu 24.04).
 _RE_TS = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+[+\-]\d{2}:\d{2})")
@@ -42,24 +54,33 @@ def parse_line(line: str) -> dict | None:
     line = line.rstrip("\n")
     ts = _parse_ts(line)
 
-    # L'ordre compte : 'invalid user' contient aussi 'Failed password' parfois.
-    m = _RE_FAILED.search(line)
-    if m:
-        outcome = "failed"
-    else:
-        m = _RE_ACCEPTED.search(line)
+    # On n'analyse que le message émis par le démon sshd.
+    prefix = _RE_PREFIX.search(line)
+    if not prefix:
+        return None
+    msg = prefix.group("msg")
+
+    for pattern, outcome in (
+        (_RE_FAILED, "failed"),
+        (_RE_ACCEPTED, "accepted"),
+        (_RE_INVALID, "invalid_user"),
+    ):
+        m = pattern.match(msg)
         if m:
-            outcome = "accepted"
-        else:
-            m = _RE_INVALID.search(line)
-            if m:
-                outcome = "invalid_user"
-            else:
-                return None
+            break
+    else:
+        return None
+
+    # L'IP est prise en fin de ligne : on la valide pour rejeter toute usurpation.
+    ip = m.group("ip")
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return None
 
     return {
         "ts": ts,
-        "ip": m.group("ip"),
+        "ip": ip,
         "username": m.group("user"),
         "outcome": outcome,
         "raw": line,
