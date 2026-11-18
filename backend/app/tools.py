@@ -7,12 +7,18 @@ le modèle), tronqué pour limiter les tokens.
 """
 import ipaddress
 import json
+import re
+import shlex
 
 from app.config import settings
 from app.db import get_conn
 
 MAX_EVENTS = 20          # nombre maximum d'événements renvoyés au modèle
 MAX_FIELD_CHARS = 2000   # troncature par champ texte
+
+# Nom d'utilisateur POSIX. Les commandes générées sont copiées par un humain dans un
+# shell : on refuse tout nom hors de ce jeu pour empêcher une injection de commande.
+_USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
 
 
 def _truncate(value: str) -> str:
@@ -95,29 +101,38 @@ def block_ip(ip: str, reason: str = "") -> dict:
     except ValueError:
         return {"ok": False, "error": f"IP invalide : {ip}"}
 
+    # Une IPv6 à scope (fe80::1%eth0) est ambiguë : on la refuse.
+    if getattr(addr, "scope_id", None):
+        return {"ok": False, "error": "IP avec scope non supportée"}
+
     # Hors mode labo, on refuse de bloquer une IP privée/locale (réseau interne).
     if (addr.is_private or addr.is_loopback) and not settings.lab_mode:
         return {"ok": False, "error": "IP privée/locale refusée hors mode labo"}
 
-    command = f"iptables -A INPUT -s {ip} -j DROP"
+    # On repart de la forme normalisée, puis on l'échappe (ceinture + bretelles).
+    normalized = str(addr)
+    binary = "iptables" if addr.version == 4 else "ip6tables"
+    command = f"{binary} -A INPUT -s {shlex.quote(normalized)} -j DROP"
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO actions (type, target, reason, command) "
             "VALUES ('block_ip', %(ip)s, %(reason)s, %(cmd)s)",
-            {"ip": ip, "reason": _truncate(reason), "cmd": command},
+            {"ip": normalized, "reason": _truncate(reason), "cmd": command},
         )
         conn.commit()
-    return {"ok": True, "action": "block_ip", "target": ip, "command": command}
+    return {"ok": True, "action": "block_ip", "target": normalized, "command": command}
 
 
 def flag_user(user: str, reason: str = "") -> dict:
     """Signale un compte comme potentiellement compromis."""
+    if not _USERNAME_RE.match(user):
+        return {"ok": False, "error": "nom d'utilisateur invalide"}
+    command = f"passwd --expire {shlex.quote(user)}  # forcer le changement de mot de passe"
     with get_conn() as conn:
         conn.execute(
             "INSERT INTO actions (type, target, reason, command) "
             "VALUES ('flag_user', %(u)s, %(reason)s, %(cmd)s)",
-            {"u": user, "reason": _truncate(reason),
-             "cmd": f"passwd --expire {user}  # forcer le changement de mot de passe"},
+            {"u": user, "reason": _truncate(reason), "cmd": command},
         )
         conn.commit()
     return {"ok": True, "action": "flag_user", "target": user}
@@ -136,12 +151,12 @@ def close_alert(alert_id: int, verdict: str, severity: str, reason: str) -> dict
     with get_conn() as conn:
         cur = conn.execute(
             "UPDATE alerts SET status='closed', verdict=%(v)s, severity=%(s)s, "
-            "reason=%(r)s WHERE id=%(id)s",
+            "reason=%(r)s WHERE id=%(id)s AND status <> 'closed'",
             {"v": verdict, "s": severity, "r": _truncate(reason), "id": alert_id},
         )
         conn.commit()
     if cur.rowcount == 0:
-        return {"ok": False, "error": f"alerte {alert_id} introuvable"}
+        return {"ok": False, "error": f"alerte {alert_id} introuvable ou déjà close"}
     return {"ok": True, "alert_id": alert_id, "verdict": verdict, "severity": severity}
 
 

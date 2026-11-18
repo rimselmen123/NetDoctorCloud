@@ -21,15 +21,17 @@ from app.db import get_conn
 #   Failed password for invalid user admin from 45.133.1.77 port 51046 ssh2
 #   Accepted password for victime from 103.88.4.19 port 40110 ssh2
 #   Invalid user admin from 45.133.1.77 port 51046
-_RE_PREFIX = re.compile(r"sshd(?:\[\d+\])?:\s*(?P<msg>.+)$")
+# Préfixe syslog : le tag « sshd[pid]: » avec un PID obligatoire (recherche linéaire).
+_RE_PREFIX = re.compile(r"\ssshd(?:-session)?\[\d+\]:\s(?P<msg>.+)$")
+# Nom d'utilisateur limité au jeu de caractères réellement accepté par sshd.
+_USER = r"(?P<user>[A-Za-z0-9._@-]{1,64})"
 _RE_FAILED = re.compile(
-    r"^Failed password for (?:invalid user )?(?P<user>.+?) "
-    r"from (?P<ip>\S+) port \d+(?: ssh2)?$"
+    rf"^Failed password for (?:invalid user )?{_USER} from (?P<ip>\S+) port \d+(?: ssh2)?$"
 )
 _RE_ACCEPTED = re.compile(
-    r"^Accepted password for (?P<user>.+?) from (?P<ip>\S+) port \d+(?: ssh2)?$"
+    rf"^Accepted password for {_USER} from (?P<ip>\S+) port \d+(?: ssh2)?$"
 )
-_RE_INVALID = re.compile(r"^Invalid user (?P<user>.+?) from (?P<ip>\S+) port \d+$")
+_RE_INVALID = re.compile(rf"^Invalid user {_USER} from (?P<ip>\S+) port \d+$")
 
 # Horodatage ISO 8601 en tête de ligne (format rsyslog moderne d'Ubuntu 24.04).
 _RE_TS = re.compile(r"^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+[+\-]\d{2}:\d{2})")
@@ -54,7 +56,7 @@ def parse_line(line: str) -> dict | None:
     line = line.rstrip("\n")
     ts = _parse_ts(line)
 
-    # On n'analyse que le message émis par le démon sshd.
+    # On n'analyse que le message émis par le démon sshd (tag avec PID obligatoire).
     prefix = _RE_PREFIX.search(line)
     if not prefix:
         return None
