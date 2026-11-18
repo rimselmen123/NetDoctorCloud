@@ -22,14 +22,37 @@ def _same_ip(a, b) -> bool:
         return False
 
 
+# Ordre de gravité, pour imposer un plancher au verdict du modèle.
+_SEV_ORDER = {"low": 1, "medium": 2, "high": 3, "critical": 4}
+
+# Plancher imposé par la détection selon le type d'alerte : le LLM ne peut JAMAIS
+# descendre en dessous (défense contre une injection de prompt qui minimiserait une
+# attaque). Le type failed_login (< 5 échecs) reste libre.
+_VERDICT_FLOOR = {
+    "success_after_failures": "critical",
+    "brute_force": "high",
+}
+
+
+def _enforce_verdict(args: dict, alert: dict) -> None:
+    """Force true_positive et un plancher de gravité pour les alertes d'attaque."""
+    floor = _VERDICT_FLOOR.get(alert.get("type"))
+    if floor is None:
+        return
+    args["verdict"] = "true_positive"
+    if _SEV_ORDER.get(args.get("severity"), 0) < _SEV_ORDER[floor]:
+        args["severity"] = floor
+
+
 def _action_guard(name: str, args: dict, alert: dict) -> dict | None:
     """Restreint les actions à l'alerte en cours (défense anti prompt-injection).
 
     Renvoie un message d'erreur à transmettre au modèle, ou None si l'action est
-    autorisée. Pour close_alert, impose l'id de l'alerte côté serveur.
+    autorisée. Pour close_alert, impose l'id et un plancher de verdict côté serveur.
     """
     if name == "close_alert":
         args["alert_id"] = alert["id"]
+        _enforce_verdict(args, alert)
         return None
     if name == "block_ip" and not _same_ip(args.get("ip"), alert["ip"]):
         return {"ok": False, "error": "block_ip limité à l'IP de l'alerte"}

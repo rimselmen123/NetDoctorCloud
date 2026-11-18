@@ -79,3 +79,20 @@ def test_respecte_max_steps(monkeypatch):
     out = agent.run_on_alert(alert, llm)
     assert out["closed"] is False
     assert llm.calls == 3  # borné par max_steps
+
+
+def test_verdict_plancher_force_true_positive(monkeypatch):
+    """Même si le LLM tente false_positive/low sur une force brute, le code force
+    true_positive et une gravité au moins high."""
+    captured = {}
+    monkeypatch.setattr(agent, "dispatch",
+                        lambda name, args: captured.update(args) or {"ok": True})
+    seq = [SimpleNamespace(content=None, tool_calls=[_tool_call(
+        "c1", "close_alert",
+        {"alert_id": 99, "verdict": "false_positive", "severity": "low", "reason": "x"})])]
+    llm = FakeLLM(seq)
+    alert = {"id": 5, "type": "brute_force", "ip": "1.2.3.4", "username": "root", "count": 20}
+    agent.run_on_alert(alert, llm)
+    assert captured["verdict"] == "true_positive"
+    assert captured["severity"] == "high"
+    assert captured["alert_id"] == 5  # id imposé côté serveur
