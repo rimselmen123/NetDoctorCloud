@@ -8,8 +8,9 @@ Un agent IA SOC qui, sur clic, enquête sur des alertes de sécurité issues de 
 ## Stack
 - Frontend : Angular, un seul `AppModule` + un seul `AppRoutingModule`, une page.
 - Backend : FastAPI (Python 3.13), SDK `openai` (Chat Completions + tools).
-- Base : PostgreSQL 17 local (driver `psycopg` v3).
-- Config : `.env` (`OPENAI_API_KEY`, `LLM_MODEL=gpt-4o-mini`, `DATABASE_URL`, `AUTH_LOG_PATH`, `LAB_MODE=true`).
+- Base : PostgreSQL 17 local, base **`AgentDoctor`** (driver `psycopg` v3).
+- Email : Gmail SMTP (`smtp.gmail.com:587`, STARTTLS) avec mot de passe d'application.
+- Config : `.env` (`OPENAI_API_KEY`, `LLM_MODEL=gpt-4o-mini`, `DATABASE_URL=postgresql://postgres:<mdp>@localhost:5432/AgentDoctor`, `AUTH_LOG_PATH`, `LAB_MODE=true`, `SMTP_USER`, `SMTP_APP_PASSWORD`, `REPORT_TO`).
 
 ## Source de données
 - Victime : WSL **Ubuntu-24.04** (`openssh-server` + `rsyslog`, utilisateur `victime`) → `/var/log/auth.log`.
@@ -24,7 +25,14 @@ Un agent IA SOC qui, sur clic, enquête sur des alertes de sécurité issues de 
    - `failed_login` : 1–4 échecs (candidat faux positif) ;
    - `success_after_failures` : succès d'une IP ayant ≥ 5 échecs.
 3. `POST /agent/run` : pour chaque alerte `open` (max 10), boucle agent (max 6 étapes) ; doit se terminer par `close_alert`.
-4. `GET /alerts`, `GET /alerts/{id}/steps`, `GET /actions`.
+4. Fin de `POST /agent/run` : envoi automatique du rapport email (voir ci-dessous) ; la réponse contient `email_sent` et `email_error`.
+5. `GET /alerts`, `GET /alerts/{id}/steps`, `GET /actions`.
+
+## Rapport email
+- Construit **en Python** depuis la base (aucun token LLM) : uniquement ce que l'agent a réellement fait.
+- Contenu (HTML + texte brut) : nb d'alertes traitées, vrais/faux positifs ; tableau par alerte (IP, compte, verdict, gravité, raison) ; actions (IP bloquées, comptes signalés, commandes générées) ; tokens consommés et coût estimé.
+- Envoyé seulement si au moins une alerte a été traitée. Échec SMTP → l'agent ne plante pas, l'erreur est renvoyée à l'interface.
+- Le mot de passe d'application n'apparaît jamais dans les logs ni dans les réponses API.
 
 ## Outils de l'agent
 Lecture : `search_events(ip?, user?, minutes?)`, `ip_history(ip)`, `user_logins(user)`.
@@ -49,7 +57,7 @@ Boutons « Collecter les logs » et « Lancer l'agent » ; tableau des alertes (
 - Clé uniquement dans `.env` (gitignored). Aucune commande système exécutée par l'agent.
 
 ## Tests (sans réseau ni clé)
-Parser sur extrait `auth.log` ; règles de détection ; outils sur base de test ; boucle agent avec faux client LLM (tool_call puis close_alert).
+Parser sur extrait `auth.log` ; règles de détection ; outils sur base de test ; boucle agent avec faux client LLM (tool_call puis close_alert) ; rapport email avec `smtplib.SMTP` mocké (contenu + gestion d'erreur).
 
 ## Scénarios de démo
 1. Une seule erreur de mot de passe → faux positif, alerte fermée sans action.
