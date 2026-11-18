@@ -3,7 +3,6 @@
 Le LLM choisit les outils ; c'est le code (dispatch) qui les exécute réellement.
 Chaque étape est tracée dans agent_steps. La boucle est bornée par max_steps.
 """
-import ipaddress
 import json
 
 from app.config import settings
@@ -12,14 +11,6 @@ from app.prompts import SOC_SYSTEM_PROMPT, alert_user_message
 from app.tools import TOOLS_SCHEMA, dispatch, dumps
 
 MAX_TOKENS = 400  # réponse courte → coût maîtrisé
-
-
-def _same_ip(a, b) -> bool:
-    """Compare deux IP sous forme normalisée (sinon False)."""
-    try:
-        return ipaddress.ip_address(str(a)) == ipaddress.ip_address(str(b))
-    except ValueError:
-        return False
 
 
 # Ordre de gravité, pour imposer un plancher au verdict du modèle.
@@ -44,21 +35,20 @@ def _enforce_verdict(args: dict, alert: dict) -> None:
         args["severity"] = floor
 
 
-def _action_guard(name: str, args: dict, alert: dict) -> dict | None:
-    """Restreint les actions à l'alerte en cours (défense anti prompt-injection).
+def _action_guard(name: str, args: dict, alert: dict) -> None:
+    """Impose côté serveur la cible des actions (défense anti prompt-injection).
 
-    Renvoie un message d'erreur à transmettre au modèle, ou None si l'action est
-    autorisée. Pour close_alert, impose l'id et un plancher de verdict côté serveur.
+    Le modèle choisit QUOI faire, mais jamais SUR QUOI : l'IP, le compte, l'id
+    d'alerte et le plancher de verdict sont fixés d'après l'alerte en cours, sans
+    faire confiance aux arguments renvoyés par le LLM.
     """
     if name == "close_alert":
         args["alert_id"] = alert["id"]
         _enforce_verdict(args, alert)
-        return None
-    if name == "block_ip" and not _same_ip(args.get("ip"), alert["ip"]):
-        return {"ok": False, "error": "block_ip limité à l'IP de l'alerte"}
-    if name == "flag_user" and args.get("user") != alert["username"]:
-        return {"ok": False, "error": "flag_user limité au compte de l'alerte"}
-    return None
+    elif name in ("user_logins", "flag_user"):
+        args["user"] = alert["username"]
+    elif name == "block_ip":
+        args["ip"] = alert["ip"]
 
 
 def _record_step(alert_id: int, step: int, tool: str, args: dict, result: dict) -> None:
